@@ -211,13 +211,15 @@
       (world-step w))))
 
 (defun process-mouse-action (w button x y)
-  (let ((x (truncate (/ (- (- x *config-grid-res*) (/ *config-graphics-window-x* 2)) *config-grid-res*)))
-        (y (truncate (/ (- (- *config-graphics-window-y* (+ y *config-grid-res*)) (/ *config-graphics-window-y* 2)) *config-grid-res*))))
+  ;; TODO: fix me to account for grid x,y mismatch (ughhhh)
+  ;; TODO: take world-view-(x|y) into account
+  (let* ((y (- *config-graphics-window-y* y 1))
+         (x (truncate (/ (- (- x *config-grid-res*) (/ *config-graphics-window-x* 2)) *config-grid-res*)))
+         (y (truncate (/ (- (- y *config-grid-res*) (/ *config-graphics-window-y* 2)) *config-grid-res*))))
     (cond ((eql button 1)
            (world-add-life w x y))
           ((>= button 3)
            (world-remove-life w x y)))))
-
 ;;; the sky is falling...free all memory and quit. 
 (defmethod world-end ((w world))
   (sdl:quit-sdl))
