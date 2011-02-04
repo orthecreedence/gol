@@ -1,16 +1,11 @@
 (in-package :gol)
 
-;;; main GOL "algorithm"
-(defparameter *world-algorithms-original* 
-  (lambda (is-alive life-count)
-    (if is-alive
-      (if (<= 2 life-count 3) t nil)
-      (if (eql life-count 3) t nil))))
-
 ;;; main world class, inits graphics and keeps track of life
 (defclass world ()
-  ((paused :accessor world-paused :initform nil)
+  ((paused :accessor world-paused :initform t)
    (life :accessor world-life :initform nil)
+   (view-x :accessor world-view-x :initform 0)
+   (view-y :accessor world-view-y :initform 0)
    (window :accessor world-window)))
 
 ;;; create the main SDL window and context blah blah, and init opengl. once our
@@ -29,7 +24,7 @@
                                            (:sdl-gl-blue-size 8)
                                            (:sdl-gl-depth-size 16))))
     ;; set up key repeat (so we can hold a key for rapid fire)
-    ;(sdl:enable-key-repeat 200 30)
+    (sdl:enable-key-repeat 200 30)
     ;; who knows - figure out what this does
 	  (gl:enable :texture-2d :blend)
 	  (gl:blend-func :src-alpha :one-minus-src-alpha)
@@ -47,6 +42,63 @@
 	  (gl:clear-color .04 .04 .04 0)
     ;; run the world...this calls our game loop
 	  (world-run w)))
+
+;;; main GOL "algorithm" ...if a slot is switched on (alive), it only stays
+;;; alive if it has either two or three neighbors. if a slot is empty, it can
+;;; only be turned on if it has exactly 3 neighbors.
+(defparameter *gol-algorithm-original*
+  (lambda (life)
+    ;; create an initial lookup table (populated below) and a next-gen container
+    ;; for storing all life who made it past this gen. we also init 
+    ;; "slots-to-check" which will be populated with actual slots we want to
+    ;; iterate over check calculating the next generation (as opposed to 
+    ;; looping over the entire grid slot by slot)
+    (let ((grid-lookup (make-hash-table :size (length life)))
+          (slots-to-check (make-hash-table :test #'equal :size (* 8 (length life))))
+          (next-gen nil))
+      ;; create helper functions to make the real processing a lot easier. the
+      ;; names should hopefully be self-explanatory
+      (labels ((get-xy-hash-key (x y) (intern (format nil "~dx~d" x y)))
+               (get-life-hash-key (life) (get-xy-hash-key (nth 0 life) (nth 1 life)))
+               (life-exists-here (x y lookup) (if (gethash (get-xy-hash-key x y) lookup) t nil))
+               (get-surrounding-slots (x y)
+                 `((,(1- x) ,(1- y)) (,x ,(1- y)) (,(1+ x) ,(1- y))
+                  (,(1- x) ,y) (,(1+ x) ,y)
+                  (,(1- x) ,(1+ y)) (,x ,(1+ y)) (,(1+ x) ,(1+ y))))
+               (count-surrounding-life (x y lookup)
+                 ;; create a list containing the x/y coords to check for life,
+                 ;; and an initial count of how many life forms
+                 (let ((surrounding (get-surrounding-slots x y))
+                       (life-count 0))
+                   ;; loop over our surrounding coordinates list and check each
+                   ;; point for life, increasing life-count if it's found
+                   (dolist (pair surrounding)
+                     (let ((x (nth 0 pair))
+                           (y (nth 1 pair)))
+                       (when (life-exists-here x y lookup)
+                         (incf life-count))))
+                   life-count)))
+        ;; populate our (empty) hash lookup such that active life forms can be
+        ;; looked up by specific x,y coordinates.
+        (dolist (l life)
+          (let ((x (nth 0 l))
+                (y (nth 1 l)))
+            ;; loop over slots that may be affected and add them to our
+            ;; makeshift "set"
+            (dolist (slot (get-surrounding-slots x y))
+              (setf (gethash `(,(nth 0 slot) ,(nth 1 slot)) slots-to-check) 1))
+            (setf (gethash (get-life-hash-key l) grid-lookup) l)))
+        ;; loop over any slots that may possibly be affected during processing
+        (loop for pair being the hash-keys in slots-to-check using (hash-value v) do
+          (let ((x (nth 0 pair))
+                (y (nth 1 pair)))
+            (when (let ((life-here (life-exists-here x y grid-lookup))
+                        (surrounding-count (count-surrounding-life x y grid-lookup)))
+                    (if life-here
+                        (if (<= 2 surrounding-count 3) t nil)
+                        (if (eql surrounding-count 3) t nil)))
+              (push `(,x ,y) next-gen)))))
+      next-gen)))
 
 ;;; toggle life at a given grid point
 (defmethod world-toggle-life ((w world) (x number) (y number))
@@ -76,48 +128,19 @@
 ;;; process life...decide who lives and dies based on gol rules. takes a lambda
 ;;; which provides the actual algorithm to use
 (defmethod world-process-life ((w world) fn)
-  ;; create an initial lookup table (populated below) and a next-gen container
-  ;; for storing all life who made it past this gen
-  (let ((grid-lookup (make-hash-table))
-        (next-gen nil))
-    ;; create helper functions to make the real processing a lot easier
-    (labels ((get-xy-hash-key (x y) (intern (format nil "~dx~d" x y)))
-             (get-life-hash-key (life) (get-xy-hash-key (nth 0 life) (nth 1 life)))
-             (life-exists-here (x y lookup) (if (gethash (get-xy-hash-key x y) lookup) t nil))
-             (count-surrounding-life (x y lookup)
-               (let ((surrounding `((,(1- x) ,(1- y)) (,x ,(1- y)) (,(1+ x) ,(1- y))
-                                    (,(1- x) ,y) (,(1+ x) ,y)
-                                    (,(1- x) ,(1+ y)) (,x ,(1+ y)) (,(1+ x) ,(1+ y))))
-                     (life-count 0))
-                 (dolist (pair surrounding)
-                   (let ((x (nth 0 pair))
-                         (y (nth 1 pair)))
-                     (when (life-exists-here x y lookup)
-                       (incf life-count))))
-                 life-count)))
-      (dolist (life (world-life w))
-        (setf (gethash (get-life-hash-key life) grid-lookup) life))
-      ;; horibly inefficient...loop over all grid points and calculate whether to
-      ;; add life, take it away, or stay the same
-      ;; TODO: find an efficient way of finding grid items to look at...aka don't
-      ;; brute force
-      (dotimes (y *config-grid-y*)
-        (dotimes (x *config-grid-x*)
-          (let ((life-here (life-exists-here x y grid-lookup))
-                (surrounding-count (count-surrounding-life x y grid-lookup)))
-            (if (funcall fn life-here surrounding-count)
-                (push `(,x ,y) next-gen))))))
-                
-    (setf (world-life w) next-gen)))
+  (setf (world-life w) (funcall fn (world-life w))))
 
 
 ;;; There are no carbon-bnased life forms in this sector (not after calling this, anyway)
 (defmethod world-reset ((w world))
+  (setf (world-paused w) t)
+  (setf (world-view-x w) 0)
+  (setf (world-view-y w) 0)
   (setf (world-life w) nil))
 
 ;;; step the world! runs the physics simulation and processes any pre/post sim
 ;;; callbacks.
-(defmethod world-step ((w world) &aux (dt (sdl:dt)))
+(defmethod world-step ((w world))
   ;; clear the screen
   (gl:clear :color-buffer :depth-buffer)
 
@@ -128,9 +151,15 @@
       (draw-life x y)))
   ;; make our life run
   (unless (world-paused w)
-    (world-process-life w *world-algorithms-original*))
+    (world-process-life w *gol-algorithm-original*))
   ;; draw the grid
   (draw-grid)
+  ;; center at 0,0 instead of x / 2, y / 2
+  (gl:load-identity)
+  (let ((x (+ (/ *config-graphics-window-x* 2) (world-view-x w)))
+        (y (+ (/ *config-graphics-window-y* 2) (world-view-y w)))
+        (z 0))
+    (gl:translate x y z))
   ;; refresh the display (aka show all the changes we just made)
   (sdl:update-display))
 
@@ -148,8 +177,16 @@
 	  (:video-expose-event () (sdl:update-display))
     ;; process keyboard input
 	  (:key-down-event (:key key)
+      (when (sdl:key= key :sdl-key-left)
+        (incf (world-view-x w) 3))
+      (when (sdl:key= key :sdl-key-right)
+        (decf (world-view-x w) 3))
+      (when (sdl:key= key :sdl-key-up)
+        (decf (world-view-y w) 3))
+      (when (sdl:key= key :sdl-key-down)
+        (incf (world-view-y w) 3))
       (when (sdl:key= key :sdl-key-minus)
-        (when (> *config-grid-res* 0)
+        (when (> *config-grid-res* 2)
           (decf *config-grid-res* 1)
           (recalculate-grid-coords)))
       (when (sdl:key= key :sdl-key-equals)
@@ -163,25 +200,23 @@
 	  	  (sdl:push-quit-event))
 	  	(when (sdl:key= key :sdl-key-escape)
 	  	  (sdl:push-quit-event)))
-    (:key-up-event (:key key))
-    (:mouse-button-down-event (:button button :state state :x x :y y)
-      (let ((x (truncate (/ x *config-grid-res*)))
-            (y (truncate (/ (- *config-graphics-window-y* y) *config-grid-res*))))
-        (cond ((eql button 1)
-               (world-add-life w x y))
-              ((>= button 3)
-               (world-remove-life w x y)))))
-    (:mouse-motion-event (:state button :x x :y y :x-rel x-rel :y-rel y-rel)
+    ;(:key-up-event (:key key))
+    (:mouse-button-down-event (:button button :x x :y y)
+      (process-mouse-action w button x y))
+    (:mouse-motion-event (:state button :x x :y y)
       (unless (eql button 0)
-        (let ((x (truncate (/ x *config-grid-res*)))
-              (y (truncate (/ (- *config-graphics-window-y* y) *config-grid-res*))))
-          (cond ((eql button 1)
-                 (world-add-life w x y))
-                ((>= button 3)
-                 (world-remove-life w x y))))))
+        (process-mouse-action w button x y)))
     ;; when not processing events, step the world
 	  (:idle ()
       (world-step w))))
+
+(defun process-mouse-action (w button x y)
+  (let ((x (truncate (/ (- (- x *config-grid-res*) (/ *config-graphics-window-x* 2)) *config-grid-res*)))
+        (y (truncate (/ (- (- *config-graphics-window-y* (+ y *config-grid-res*)) (/ *config-graphics-window-y* 2)) *config-grid-res*))))
+    (cond ((eql button 1)
+           (world-add-life w x y))
+          ((>= button 3)
+           (world-remove-life w x y)))))
 
 ;;; the sky is falling...free all memory and quit. 
 (defmethod world-end ((w world))
